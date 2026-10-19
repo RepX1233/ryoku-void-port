@@ -85,3 +85,8 @@ Este port utiliza auto-detección de GPU y monitores:
 
 ## 📄 Licencia
 Distribuido bajo **GPL-3.0**, siguiendo la licencia del monorepo oficial de Ryoku.
+
+## 🛡️ Mejoras de Producción (Runit + Elogind)
+Este port ahora cuenta con:
+- **Daemon Inmortal:** `ryoku-shell` es supervisado por `runit`. Si el proceso muere, se reinicia automáticamente.
+- **Gestión de Energía:** Integración nativa con `elogind` para manejar el cierre de tapa (suspend) de forma eficiente.
