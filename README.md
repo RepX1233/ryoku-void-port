@@ -88,5 +88,18 @@ Distribuido bajo **GPL-3.0**, siguiendo la licencia del monorepo oficial de Ryok
 
 ## 🛡️ Mejoras de Producción (Runit + Elogind)
 Este port ahora cuenta con:
-- **Daemon Inmortal:** `ryoku-shell` es supervisado por `runit`. Si el proceso muere, se reinicia automáticamente.
+- **Daemon Inmortal:** `ryoku-shell` es supervisado por `runit` mediante un watchdog que cada 5 s hace `ryoku-shell ping`; si el daemon no responde, lo relanza **recuperando el env de la sesión Wayland viva** (toma `WAYLAND_DISPLAY` y `HYPRLAND_INSTANCE_SIGNATURE` de un cliente vivo de la sesión, con fallback a `/run/user/1000/hypr/` y al socket `wayland-*`). Evita así los típicos fallos `Failed to create wl_display`. Instálalo con:
+  ```sh
+  sudo mkdir -p /etc/sv/ryoku-shell
+  sudo cp runit/ryoku-shell/run /etc/sv/ryoku-shell/run
+  sudo chmod +x /etc/sv/ryoku-shell/run
+  sudo ln -sf /etc/sv/ryoku-shell /var/service/
+  ```
+- **Shim `systemctl` inteligente** (`systemctl-shim.sh` → `/usr/local/bin/systemctl`): traduce a runit —
+  `is-active` consulta los symlinks de `/var/service` (y `pgrep` en unidades `--user`), `stop`→`sv stop`/`pkill`,
+  `reboot`/`poweroff`→ binarios reales, y `start`/`restart`/`daemon-reload` de usuario devuelven error a propósito
+  para que los scripts upstream caigan en su fallback `setsid` (sin inventar lanzamientos falsos).
 - **Gestión de Energía:** Integración nativa con `elogind` para manejar el cierre de tapa (suspend) de forma eficiente.
+- **Referencia `refs/sys-init.go`:** abstracción `InitManager` (Systemd/Runit) lista para futura inclusión en el CLI
+  cuando se decide no depender del shim. Nota: los módulos Go de Ryoku (`cli`, `hub/backend`, `shell/ipc`) son
+  independientes — no se pueden importar entre sí; duplica o usa build tags dentro de cada módulo.

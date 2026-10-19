@@ -1,0 +1,30 @@
+#!/bin/sh
+# Watchdog: recupera el env de la sesión Wayland viva y (re)lanza el daemon.
+exec 2>/dev/null
+while true; do
+  if ! su - subaru -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u); export PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin; ryoku-shell ping' >/dev/null 2>&1; then
+    ENVF=/tmp/ryoku-shell-watchdog.env
+    : > $ENVF
+    # 1) copiar env de un cliente Wayland vivo de la sesión (ryogami/quickshell)
+    SRC=$(pgrep -f "quickshell -p /usr/share/ryogami" | head -n1)
+    if [ -n "$SRC" ]; then
+      tr '\0' '\n' < /proc/$SRC/environ 2>/dev/null | grep -E '^(HYPRLAND_INSTANCE_SIGNATURE|WAYLAND_DISPLAY|XAUTHORITY|XDG_CURRENT_DESKTOP|DISPLAY|QT_QPA_PLATFORM|XDG_SESSION_TYPE|XDG_SESSION_DESKTOP|XCURSOR_THEME|XCURSOR_SIZE|HYPRLAND_CONFIG)=' > $ENVF
+    fi
+    # 2) fallback: firma desde el runtime dir + socket wayland visible
+    if ! grep -q HYPRLAND_INSTANCE_SIGNATURE $ENVF 2>/dev/null; then
+      SIG=$(basename "$(ls -d /run/user/1000/hypr/*/ 2>/dev/null | head -n1)")
+      [ -n "$SIG" ] && echo "HYPRLAND_INSTANCE_SIGNATURE=$SIG" >> $ENVF
+    fi
+    if ! grep -q '^WAYLAND_DISPLAY=' $ENVF 2>/dev/null; then
+      W=$(ls /run/user/1000/ 2>/dev/null | grep -E '^wayland-[0-9]+$' | head -n1)
+      [ -n "$W" ] && echo "WAYLAND_DISPLAY=$W" >> $ENVF
+    fi
+    grep -q '^WAYLAND_DISPLAY=' $ENVF 2>/dev/null || { sleep 5; continue; }
+    ENVARGS=$(sed 's/^/ /' $ENVF | tr '\n' ' ')
+    chpst -u subaru env $ENVARGS \
+      XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/subaru \
+      PATH=/home/subaru/.local/bin:/usr/local/bin:/usr/bin:/bin \
+      ryoku-shell daemon >>/tmp/ryoku-shell-watchdog.log 2>&1 || true
+  fi
+  sleep 5
+done
