@@ -1,62 +1,59 @@
 #!/usr/bin/env bash
-# =============================================================================
-# systemctl-shim.sh — Traductor inteligente systemd -> runit para Ryoku en Void
-# Intercepta llamadas de Ryoku a systemctl y las mapea a comandos nativos de Void.
-# Instalación: sudo ln -sf $(pwd)/systemctl-shim.sh /usr/local/bin/systemctl
-# =============================================================================
-set -euo pipefail
+# systemctl → runit shim inteligente para Void Linux (port Ryoku)
+set -uo pipefail
 
-action="${1:-}"
-shift || true
+# Desglose de argumentos: ignora --user/--no-ask-password/--quiet/--now
+user_mode=0
+args=()
+for a in "$@"; do
+  case "$a" in
+    --user) user_mode=1 ;;
+    --*) ;;
+    *) args+=("$a") ;;
+  esac
+done
+action="${args[0]:-}"
+unit="${args[1]:-}"
+svc="${unit%.service}"
 
 case "$action" in
-  --user)
-    user_action="${1:-}"
-    shift || true
-    unit="${1:-}"
-    service_name="${unit%.service}"
-    
-    case "$user_action" in
-      is-active)
-        # Verifica si el servicio de Ryoku está corriendo en segundo plano
-        pgrep -f "$service_name" >/dev/null && exit 0 || exit 3
-        ;;
-      stop)
-        pkill -f "$service_name" || true
-        exit 0
-        ;;
-      restart|start)
-        # Lanza servicios críticos de Ryoku con setsid
-        if [ "$service_name" = "voxtype" ]; then
-          setsid voxtype daemon >/dev/null 2>&1 &
-        fi
-        exit 0
-        ;;
-      *) exit 0 ;;
-    esac
-    ;;
-    
-  is-active)
-    unit="${1:-}"
-    service_name="${unit%.service}"
-    # Mapeo a runit de Void
-    if [ -L "/var/service/$service_name" ] && sv status "$service_name" >/dev/null 2>&1; then
-      exit 0
-    else
-      exit 3
-    fi
-    ;;
-    
-  restart|stop|start)
-    unit="${1:-}"
-    service_name="${unit%.service}"
-    if [ -d "/etc/sv/$service_name" ]; then
-      sudo sv "$action" "$service_name" || true
-    fi
-    exit 0
-    ;;
-    
   reboot) exec reboot ;;
   poweroff|shutdown) exec poweroff ;;
+  halt) exec halt ;;
+
+  is-active|is-enabled|status)
+    if (( user_mode )); then
+      # servicio de usuario: detectar proceso vivo
+      pgrep -f "$svc" >/dev/null && exit 0 || exit 3
+    fi
+    # servicio de sistema: runit
+    # sv status puede dar 'access denied' al usuario normal; el symlink en
+    # /var/service es la fuente de verdad de habilitación de runit.
+    if [ -L "/var/service/$svc" ]; then exit 0; fi
+    if [ -d "/etc/sv/$svc" ]; then sv status "$svc" >/dev/null 2>&1 && exit 0; fi
+    exit 3
+    ;;
+
+  stop)
+    if (( user_mode )); then pkill -f "$svc" 2>/dev/null; exit 0; fi
+    if [ -d "/etc/sv/$svc" ]; then sv stop "$svc" >/dev/null 2>&1; fi
+    exit 0
+    ;;
+
+  start|restart|try-restart|reload)
+    if (( user_mode )); then
+      # daemon-reload y restarts de usuario: el lanzamiento real lo hace
+      # deploy.sh/autostart con setsid; salir con error activa su fallback.
+      exit 1
+    fi
+    if [ -d "/etc/sv/$svc" ]; then sv "$action" "$svc" >/dev/null 2>&1 || true; fi
+    exit 0
+    ;;
+
+  daemon-reload|reset-failed|enable|disable|mask|unmask|set-environment|show|cat)
+    # sin-op compatible: el ecosistema runit no los necesita
+    (( user_mode )) && exit 1 || exit 0
+    ;;
+
   *) exit 0 ;;
 esac
