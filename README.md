@@ -103,3 +103,22 @@ Este port ahora cuenta con:
 - **Referencia `refs/sys-init.go`:** abstracción `InitManager` (Systemd/Runit) lista para futura inclusión en el CLI
   cuando se decide no depender del shim. Nota: los módulos Go de Ryoku (`cli`, `hub/backend`, `shell/ipc`) son
   independientes — no se pueden importar entre sí; duplica o usa build tags dentro de cada módulo.
+
+## 🔑 Actualizaciones sin contraseña (botón Update del Hub)
+
+`ryoku update` necesita algunos `sudo` puntuales (instalar helpers en `/usr/bin`,
+recargar el shim `systemctl`, aplicar el tema de arranque). Sin TTY esos pasos
+fallan, así que el port incluye una regla sudoers acotada:
+
+```sh
+sudo install -m0440 sudoers/ryoku-update /etc/sudoers.d/zz-ryoku-update
+```
+
+*   **Comandos permitidos sin contraseña:** `install`, `cp`,
+    `/usr/local/bin/systemctl` (el shim), `ryoku-boot-apply` y
+    `xbps-install -Su` (solo para `ryoku update --system`).
+*   **Nombre `zz-*`: sudo aplica la última regla que casa**; el archivo debe
+    ordenarse después de `wheel` para que el NOPASSWD gane.
+*   ⚠️ **Seguridad:** `install`/`cp` como root equivalen funcionalmente a dar
+    privilegios de root al usuario. Aceptable en un equipo personal de un solo
+    usuario — **no instalar en máquinas multiusuario**.

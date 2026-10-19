@@ -1,0 +1,15 @@
+# ryoku-void-port: permite `ryoku update` (botón Update del Hub) sin contraseña
+# y sin TTY. Comandos limitados al flujo de deploy en Void: deploy.sh instala
+# los helpers con install/cp, recarga el shim systemctl y aplica el tema de
+# arranque; con --system el CLI pide además un xbps-install -Su.
+# NOTA de seguridad: instalar esto otorga a subaru autonomía de escritura casi
+# total vía install/cp (equivalente funcional a root). Aceptable en un equipo
+# personal de un solo usuario; no instalar en máquinas multiusuario.
+# El nombre zz-* es deliberado: sudo aplica la ÚLTIMA regla que casa, y este
+# archivo debe leerse DESPUÉS de `wheel` para que el NOPASSWD gane.
+subaru ALL=(root) NOPASSWD: \
+    /usr/bin/install, \
+    /usr/bin/cp, \
+    /usr/local/bin/systemctl, \
+    /usr/bin/ryoku-boot-apply, \
+    /usr/bin/xbps-install -Su
