@@ -1,93 +1,94 @@
-# Ryoku en Void / Neko Void — port de la shell
+# Ryoku Shell — Port para Void Linux / Neko Void
 
-Instalador adaptado (`ryoku-void-install.sh`) que pone la **shell de Ryoku**
-(bar, pill, launcher, frame, hub de ajustes, wallpapers con matugen) encima de
-una instalación **Void Linux** (o su derivado Neko Void, xbps + runit).
+Adaptación comunitaria del entorno gráfico **Ryoku** (Hyprland + Quickshell + Daemons en Go + Matugen) optimizada para sistemas **Void Linux** basados en **runit** y **xbps**.
 
-Ryoku oficialmente solo instala sobre Arch/CachyOS (o el port comunitario a
-NixOS). Esto **no es un port oficial**: es una adaptación que compila los
-componentes desde el monorepo y sustituye las partes que dependen de Arch.
+---
 
-## Qué instala
+## 🚀 ¿Qué es Ryoku?
 
-| Componente | Origen |
+Ryoku es un entorno de escritorio moderno, altamente personalizable y fluido construido sobre **Hyprland** (Wayland) y **Quickshell** (QML/Qt6), diseñado originalmente para Arch Linux / CachyOS. Este port adapta todo el ecosistema para funcionar de manera nativa en Void Linux sin dependencias de `systemd`.
+
+---
+
+## 🛠️ Componentes del Port
+
+| Componente | Origen / Adaptación |
 |---|---|
-| Hyprland + hypridle/lock/sunset, protocolos | repo binario comunitario `void-land/hyprland-void-packages` |
-| Quickshell con soporte Hyprland | reconstruido desde `void-packages` con `-DHYPRLAND=ON` (xbps-src) |
-| matugen, pipewire, portal, grim/slurp/cliphist, runtime | repos oficiales de Void |
-| `ryoku-shell`, `ryoku-hub`, `ryogami`, `ryoku` (CLI) | compilados del monorepo con Go (vendor incluido) |
-| `ryoku-blobs`, `Ryoku.Ui`, `Ryoku.FrameBars`, `Ryoku.PluginKit` | CMake + QML, instalados en `/usr/lib/qt6/qml` |
-| Config base → `~/.config` | `ryoku materialize` (o copia manual equivalente) |
-| Autostart sin systemd | parche en `hypr/modules/autostart.lua` (arranca la shell con `setsid ... &`) |
-| Sesión "Ryoku" | `/usr/share/wayland-sessions/ryoku.desktop` |
+| **Compositor (Hyprland)** | Paquetes precompilados de Void Linux (repositorios comunitarios / `xbps-src`) |
+| **Quickshell** | Reconstruido localmente con soporte `-DHYPRLAND=ON` (`xbps-src`, fijado en hold `_2`) |
+| **Daemons y CLI** | `ryoku-shell`, `ryoku-hub`, `ryogami`, y `ryoku` (CLI) compilados en Go |
+| **Widgets y QML** | `ryoku-blobs`, `Ryoku.Ui`, `Ryoku.FrameBars`, `Ryoku.PluginKit` (Qt6 QML plugins) |
+| **Gestión de Servicios** | Sustitución de unidades de usuario de `systemd` por lanzamientos en segundo plano vía `setsid` y supervisión por `runit` |
 
-## Uso
+---
 
-En la máquina Void (a esta instalación de prueba — dual boot), como root:
+## 📦 Guía de Instalación Paso a Paso
 
+### Precondiciones
+1. Tener una instalación base de **Void Linux** (glibc) funcionando con un usuario con privilegios `sudo`.
+2. Conexión a internet activa.
+
+### Paso 1: Clonar el repositorio del port
 ```sh
+git clone https://github.com/RepX1233/ryoku-void-port.git
+cd ryoku-void-port
+```
+
+### Paso 2: Instalación masiva de aplicaciones y base de sistema (`void-setup.sh`)
+Este script habilita los repositorios `nonfree` y `multilib`, e instala la suite recomendada de aplicaciones (navegadores, multimedia, emuladores y herramientas de desarrollo) tanto por `xbps` como por `flatpak`:
+```sh
+sudo chmod +x void-setup.sh
+sudo ./void-setup.sh
+```
+
+### Paso 3: Ejecutar el instalador de la Shell de Ryoku (`ryoku-void-install.sh`)
+El script principal clona el monorepo oficial de Ryoku, compila los binarios, recompila Quickshell con soporte Wayland/Hyprland y materializa las configuraciones en tu usuario:
+```sh
+chmod +x ryoku-void-install.sh
 sudo bash ryoku-void-install.sh
 ```
+*   *Nota opcional:* Si deseas especificar un usuario objetivo que no sea el actual: `--user=tu_usuario`. Si ya tienes quickshell compilado: `--skip-quickshell`.
 
-- `--user=pepe` → otro usuario objetivo (por defecto `$SUDO_USER`).
-- `--update` → `git pull` + recompila + re-materializa (actualización manual).
-- `--skip-quickshell` → si ya tienes un quickshell con Hyprland, evita el build
-  pesado (queda en `hold` con revisión `_2`).
+### Paso 4: Iniciar Sesión
+1. Cierra sesión en tu gestor actual (SDDM con quiosco Weston recomendado).
+2. Selecciona la sesión **Ryoku** en el menú de Wayland.
+3. ¡Disfruta del entorno!
 
-### Tiempos
+---
 
-- `binary-bootstrap` (una vez): descarga la base del chroot, ~minutos.
-- **Compilar quickshell con `HYPRLAND=ON`: 10–30 min** (Qt6/C++), es el paso lento.
-- Compilar los binarios Go: 1–3 min.
+## 🎨 Wallpapers, Rices y Personalización
 
-## Lo que NO funciona aquí (límites del port)
+El ecosistema de Ryoku incluye potentes herramientas de personalización visual integradas:
 
-- **Actualizaciones**: no hay repo firmado `[ryoku]`. Actualizar = `--update`
-  (git pull + rebuild). `ryoku update/rollback/snapshots` no sirven en Void.
-- **Units de systemd**: sin `ryoku-boot-guard`, los servicios del escritorio los
-  lanza Hyprland en el autostart (parche incluido). `ryoku doctor` parcial.
-- **Snapshots** (snapper), **gpk**, **greeter SDDM de weston**, **theme de
-  browser** por defecto y **plugins de Hyprland** (sensibles a versión).
-- **Iconos**: la barra usa *Material Symbols Rounded*; el script lo descarga a
-  `~/.local/share/fonts`. Sin él los iconos se ven como ligaduras de texto.
-- `ryoku CLI` necesita `pacman` para `update`; `materialize`, `reload`, `version`
-  sí funcionan.
+*   **Ryogami (Daemon de Wallpapers & Temas):** Administra los fondos de pantalla y genera paletas dinámicas automáticas mediante `matugen` para toda la interfaz (barra, barras laterales, terminales y aplicaciones GTK/Qt).
+*   **Comandos de Wallpaper:**
+    *   `ryogami wallpaper ui` -> Abre el selector visual de fondos de pantalla.
+    *   `ryogami wallpaper random` -> Selecciona y aplica un wallpaper aleatorio re-mapeando los colores del sistema al instante.
+*   **Rices y Temas de la Comunidad:** Ryoku soporta perfiles visuales completos (como *Aperiture*, *Evangelion*, *Lumen*, etc.) gestionados a través de la tienda y el Hub de ajustes (`ryoku-hub` o Super+,).
 
-## Solución de problemas
+---
 
-- **`xbps-install -S` pide la huella del repo Hyprland** → acepta con `Y` (es el
-  repo binario comunitario `void-land`).
-- **binary-bootstrap falla por user namespaces** → compílalo a mano:
-  ```sh
-  cd ~/ryoku-void-build/void-packages
-  sudo ./xbps-src binary-bootstrap      # o habilita user namespaces
-  ./xbps-src pkg quickshell
-  sudo xbps-install -R hostdir/binpkgs quickshell
-  ```
-- **`Quickshell.Hyprland` no se encuentra** al arrancar → el quickshell instalado
-  no tiene soporte Hyprland; reinstala el portado (`--skip-quickshell` NO), o
-  verifica: `xbps-query -p pkgver quickshell` debe ser `..._2` y estar en hold.
-- **El DM no muestra la sesión "Ryoku"** → algunos gestores (LightDM GTK, MDM) no
-  leen `/usr/share/wayland-sessions`. Alternativa: inicia sesión en MATE y en
-  una terminal ejecuta `Hyprland` (con `setsid` si quieres despegarla del TTY).
-- **Escritorio negro sin barra** → mira `~/.local/state/ryoku/` / `ps aux |
-  grep ryoku-shell`. Si `ryoku-shell` no corre, reinicia la sesión; el autostart
-  parcheado lo levanta con el compositor.
-- **Log de instalación**: el propio script imprime el avance; guarda la salida
-  con `sudo bash ryoku-void-install.sh 2>&1 | tee /tmp/ryoku-void-install.log`.
+## ⚙️ Mantenimiento y Comandos Útiles
 
-## Estructura
+*   **Actualizar/Recompilar la shell desde el monorepo:**
+    ```sh
+    cd ~/ryoku/ryoku/shell/ipc
+    go build -o ~/.local/bin/ryoku-shell .
+    ryoku materialize
+    ryoku reload
+    ```
+*   **Diagnóstico del sistema:**
+    ```sh
+    ryoku doctor
+    ```
+*   **Reconstrucción del stack de Hyprland (si hay cambios de librerías .so):**
+    ```sh
+    cd ~/ryoku-void-build
+    ./rebuild-hypr-stack.sh all
+    ```
 
-```
-/tu-home/
-├── ryoku/                       # checkout del monorepo (main)
-└── ryoku-void-build/            # pool xbps-src (void-packages + hostdir/binpkgs)
-└── ryoku-void-stage/            # binarios compilados (antes de instalarlos)
-/usr/share/ryoku/config          # base que materializa en ~/.config
-/usr/lib/qt6/qml/Ryoku/         # Blobs, Ui, FrameBars, PluginKit
-```
+---
 
-## Nota legal
+## 📄 Licencia
 
-Ryoku es GPL-3.0 (monorepo en github.com/ryoku-dev/ryoku). Este port no está
-afiliado a Ryoku; es una adaptación de terceros para cubrir Void/Neko Void.
+Este port y los scripts auxiliares se distribuyen bajo licencia **GPL-3.0**, en concordancia con el monorepo oficial de Ryoku (`github.com/ryoku-dev/ryoku`).
