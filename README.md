@@ -73,7 +73,7 @@ sudo xbps-install -y turnstile elogind seatd polkitd dbus
 ### 2. Instalación completa
 
 ```sh
-git clone https://github.com/RepX1233/ryoku-void-port.git
+git clone -b refactor/turnstile-xbps https://github.com/RepX1233/ryoku-void-port.git
 cd ryoku-void-port
 sudo bash ryoku-void-install.sh
 ```
