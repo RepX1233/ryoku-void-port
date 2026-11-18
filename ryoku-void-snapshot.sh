@@ -32,8 +32,10 @@ root_fstype() { findmnt -no FSTYPE / 2>/dev/null || echo unknown; }
 
 # Config de snapper a usar: ryoku si existe, si no root.
 snapper_config() {
-  if [ -r /etc/snapper/configs/ryoku.conf ]; then echo ryoku
-  elif [ -r /etc/snapper/configs/root.conf ]; then echo root
+  # Los configs de snapper son /etc/snapper/configs/<nombre> SIN extensión
+  # (igual que consulta ryoku-boot-guard/run); el nombre es lo que va a -c.
+  if [ -r /etc/snapper/configs/ryoku ]; then echo ryoku
+  elif [ -r /etc/snapper/configs/root ]; then echo root
   else echo ""; fi
 }
 

@@ -48,16 +48,17 @@ for svcdir in "$SRC"/*; do
   if [ "$FORCE" = 1 ]; then
     for f in run finish; do
       [ -f "$svcdir/$f" ] || continue
-      if [ -f "$target/$f" ] && ! cmp -s "$svcdir/$f" "$target/$f"; then
-        cp -a "$target/$f" "$target/$f.bak"
-        cp -a "$svcdir/$f" "$target/$f"
-        chmod 755 "$target/$f"
-        updated=$((updated + 1))
-      elif [ ! -f "$target/$f" ]; then
-        cp -a "$svcdir/$f" "$target/$f"
-        chmod 755 "$target/$f"
-        updated=$((updated + 1))
+      if [ -f "$target/$f" ] && cmp -s "$svcdir/$f" "$target/$f"; then
+        continue   # idéntico: nada que hacer
       fi
+      [ -f "$target/$f" ] && cp -a "$target/$f" "$target/$f.bak"
+      # Escritura ATÓMICA: primero a .tmp (con chmod 755) y luego mv -f.
+      # Un cp directo sobre el run en ejecución daría "Text file busy" (ETXTBSY)
+      # y dejaría el servicio a medio escribir si el proceso falla.
+      cp -a "$svcdir/$f" "$target/$f.tmp"
+      chmod 755 "$target/$f.tmp"
+      mv -f "$target/$f.tmp" "$target/$f"
+      updated=$((updated + 1))
     done
   fi
 done

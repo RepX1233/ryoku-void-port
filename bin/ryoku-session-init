@@ -60,13 +60,36 @@ publish_env() {
   dest=$1
   mkdir -p "$dest" 2>/dev/null || { log "no pude crear $dest"; return 1; }
   chmod 700 "$dest" 2>/dev/null || true
-  env | while IFS='=' read -r name value; do
+  # env serializa los valores multilínea como líneas de continuación SIN '='.
+  # Se procesa línea a línea: la llegada de una continuación retira la parte
+  # ya escrita de esa variable (multilínea -> ignorada por completo, no
+  # publicada a medias) y $last queda vacío para no tocar nada por error.
+  last=
+  env | while IFS= read -r line; do
+    case $line in
+      *=*) ;;
+      *)
+        [ -n "$last" ] && rm -f "$dest/$last"
+        last=
+        continue
+        ;;
+    esac
+    name=${line%%=*}
+    value=${line#*=}
+    # Nombre válido de variable POSIX: descarta funciones exportadas de Bash
+    # (BASH_FUNC_foo%% -> '%' no es [A-Za-z0-9_]), restos con símbolos y
+    # nombres que empiezan por dígito.
     case $name in
-      PWD|OLDPWD|SHLVL|_|TURNSTILE_*|RYOKU_SESSION_*) continue ;;
+      ''|*[!A-Za-z0-9_]*|[0-9]*) last=; continue ;;
+      PWD|OLDPWD|SHLVL|_|TURNSTILE_*|RYOKU_SESSION_*) last=; continue ;;
     esac
     # envdir: el valor es el contenido; sin salto final de línea.
-    printf '%s' "$value" > "$dest/$name" 2>/dev/null || \
+    if printf '%s' "$value" > "$dest/$name" 2>/dev/null; then
+      last=$name
+    else
+      last=
       log "aviso: no pude publicar $name"
+    fi
   done
 }
 
