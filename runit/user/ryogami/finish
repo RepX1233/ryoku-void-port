@@ -1,0 +1,4 @@
+#!/bin/sh
+# finish de ryogami: runsv reinicia ./run cuando ./finish termina.
+exec 2>&1
+exit 0

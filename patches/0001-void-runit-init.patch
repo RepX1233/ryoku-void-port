@@ -1,0 +1,254 @@
+From: ryoku-void-port <local@void>
+Subject: [PATCH] void: runit/turnstile nativo para cli, shell/ipc y hub (sin shim systemctl)
+
+Sustituye el hijacking global de /usr/local/bin/systemctl por detección y
+control nativos de runit en los módulos Go del monorepo:
+
+  * cli/internal/sys/runit.go (nuevo): IsRunit(), UserServicesDir(),
+    SvUser()/SvUserStatus() -> `sv` con SVDIR=$XDG_RUNTIME_DIR/service
+    (~/.config/service, el dir que supervisa turnstile). SIN sudo.
+    UnitEnabled() pasa a ser init-aware: en runit comprueba la provisión
+    de turnstile//var/service y NUNCA invoca systemctl.
+  * cli/internal/host/power.go: si `loginctl <acción>` falla (Void con
+    sólo seatd, sin login1), cae a los binarios directos: reboot,
+    poweroff y `zzz` para suspender.
+  * shell/ipc/session.go: los botones Reboot/Shutdown del diálogo de
+    sesión reintetan vía loginctl y luego binarios directos cuando el
+    bus de sistema no tiene login1.
+  * hub/backend y shell/ipc: sin llamadas systemctl (verificado con
+    grep en el árbol); la energía en shell/ipc ya iba por login1 y el
+    acceso a servicios pasa por `ryoku-host`/sv. No requieren cambios.
+
+Aplicar en el monorepo (Ryoku-dev/ryoku):
+
+    cd ryoku
+    patch -p1 < patches/0001-void-runit-init.patch
+    # o: git apply patches/0001-void-runit-init.patch
+
+El port no instala ningún shim de systemctl salvo con --with-systemctl-shim
+(modo legado opcional, desactivado por defecto).
+
+---
+diff --git a/ryoku/cli/internal/host/power.go b/ryoku/cli/internal/host/power.go
+--- a/ryoku/cli/internal/host/power.go	2026-11-17 22:07:58.282541597 -0600
++++ b/ryoku/cli/internal/host/power.go	2026-11-17 22:09:39.437096562 -0600
+@@ -1,5 +1,7 @@
+ package host
+ 
++import "os/exec"
++
+ func (a *App) Power(args []string) int {
+ 	if len(args) == 0 {
+ 		return ExitUsage
+@@ -22,5 +24,20 @@
+ 	if init == Systemd {
+ 		command = "systemctl"
+ 	}
+-	return commandExit(a.run(command, args[0]))
++	result := a.run(command, args[0])
++	if result.Code == 0 || init == Systemd {
++		return commandExit(result)
++	}
++	// Void sin elogind (sólo seatd): no hay login1 en el bus y loginctl falla.
++	// runit no tiene systemctl, así que se usan los binarios directos:
++	//   poweroff/reboot -> util-linux, suspend -> zzz (acpi sleep de Void).
++	switch args[0] {
++	case "poweroff":
++		return commandExit(a.run("poweroff"))
++	case "reboot":
++		return commandExit(a.run("reboot"))
++	case "suspend":
++		return commandExit(a.run("zzz"))
++	}
++	return commandExit(result)
+ }
+diff --git a/ryoku/cli/internal/sys/runit.go b/ryoku/cli/internal/sys/runit.go
+new file mode 100644
+--- /dev/null
++++ b/ryoku/cli/internal/sys/runit.go	2026-11-17 22:09:04.738535846 -0600
+@@ -0,0 +1,118 @@
++package sys
++
++import (
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++)
++
++// runit.go — soporte NATIVO de runit/turnstile para los módulos Go de Ryoku.
++//
++// En Void no hay systemctl global (el shim /usr/local/bin/systemctl se retira;
++// ver --with-systemctl-shim). En su lugar:
++//
++//   - servicios de USUARIO: `sv` con SVDIR apuntando al dir que supervisa el
++//     runsvdir de turnstile (~/.config/service, enlazado como
++//     $XDG_RUNTIME_DIR/service por ryoku-session-init). Sin sudo.
++//   - servicios de SISTEMA: existencia del symlink /var/service/<nombre>
++//     (escritura: sudo, que los llamadores piden sólo cuando toca).
++//   - energía: `loginctl` (elogind) o los binarios directos (reboot/poweroff/zzz).
++//
++// IsRunit() usa el mismo criterio que el seam `ryoku-host`
++// (/run/systemd/system sólo existe con systemd), con RYOKU_HOST_INIT como
++// override para pruebas.
++
++// IsRunit reporta si el init del sistema es runit (no systemd).
++func IsRunit() bool {
++	if v := os.Getenv("RYOKU_HOST_INIT"); v != "" {
++		return v == "runit"
++	}
++	_, err := os.Stat("/run/systemd/system")
++	return err != nil
++}
++
++// UserServicesDir resuelve el dir de servicios de usuario de turnstile:
++//  1. $SVDIR                        (control explícito del llamador)
++//  2. $XDG_RUNTIME_DIR/service      (enlace creado por ryoku-session-init)
++//  3. ~/.config/service             (dir real supervisado por turnstile)
++func UserServicesDir() string {
++	if d := os.Getenv("SVDIR"); d != "" {
++		return d
++	}
++	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" {
++		p := filepath.Join(x, "service")
++		if fi, err := os.Lstat(p); err == nil && (fi.IsDir() || fi.Mode()&os.ModeSymlink != 0) {
++			return p
++		}
++	}
++	if h, err := os.UserHomeDir(); err == nil {
++		return filepath.Join(h, ".config", "service")
++	}
++	return ""
++}
++
++// SvUser ejecuta `sv <verb> <servicio>` sobre los servicios de usuario SIN
++// sudo. Devuelve error si no hay sesión turnstile activa o el servicio no
++// existe, para que el llamador lo reporte en vez de fingir éxito.
++func SvUser(verb string, services ...string) error {
++	dir := UserServicesDir()
++	if dir == "" {
++		return fmt.Errorf("runit: sin dir de servicios de usuario (¿turnstile/ sesión gráfica?)")
++	}
++	for _, service := range services {
++		if _, err := os.Stat(filepath.Join(dir, service)); err != nil {
++			return fmt.Errorf("runit: servicio desconocido %q en %s: %w", service, dir, err)
++		}
++	}
++	cmd := exec.Command(append([]string{"sv", verb}, services...)...)
++	cmd.Env = append(os.Environ(), "SVDIR="+dir)
++	if out, err := cmd.CombinedOutput(); err != nil {
++		return fmt.Errorf("sv %s %s: %w (%s)", verb, strings.Join(services, " "), err, strings.TrimSpace(string(out)))
++	}
++	return nil
++}
++
++// SvUserStatus devuelve la línea de estado de `sv status` (p.ej.
++// "run: ryoku-shell: (pid 1234) 45s") o "" si no está en marcha.
++func SvUserStatus(service string) string {
++	dir := UserServicesDir()
++	if dir == "" {
++		return ""
++	}
++	cmd := exec.Command("sv", "status", service)
++	cmd.Env = append(os.Environ(), "SVDIR="+dir)
++	out, err := cmd.CombinedOutput()
++	if err != nil {
++		return ""
++	}
++	return strings.TrimSpace(string(out))
++}
++
++// runitUnitEnabled: en runit "habilitado" significa "existe y está provisionado".
++//   - usuario: el dir del servicio está en el dir de turnstile.
++//   - sistema: el symlink /var/service/<nombre> existe.
++func runitUnitEnabled(unit string) bool {
++	name := strings.TrimSuffix(unit, ".service")
++	if dir := UserServicesDir(); dir != "" {
++		if fi, err := os.Stat(filepath.Join(dir, name)); err == nil && fi.IsDir() {
++			return true
++		}
++	}
++	if _, err := os.Lstat(filepath.Join("/var/service", name)); err == nil {
++		return true
++	}
++	return false
++}
++
++// UnitEnabled informa si una unidad está habilitada en este host.
++// En systemd es `systemctl is-enabled` (incluye static/alias). En runit no hay
++// enablement: se consulta la provisión de turnstile /var/service, y jamás se
++// invoca systemctl (por eso el port no necesita shim global).
++func UnitEnabled(unit string) bool {
++	if IsRunit() {
++		return runitUnitEnabled(unit)
++	}
++	return exec.Command("systemctl", "is-enabled", "--quiet", unit).Run() == nil
++}
+diff --git a/ryoku/cli/internal/sys/sys.go b/ryoku/cli/internal/sys/sys.go
+--- a/ryoku/cli/internal/sys/sys.go	2026-11-17 22:07:58.279739883 -0600
++++ b/ryoku/cli/internal/sys/sys.go	2026-11-17 22:09:12.344097128 -0600
+@@ -48,11 +48,8 @@
+ 	return exec.Command("pacman", "-Q", name).Run() == nil
+ }
+ 
+-// UnitEnabled reports whether a systemd unit is enabled (or static/alias --
+-// anything systemctl reports as will-start).
+-func UnitEnabled(unit string) bool {
+-	return exec.Command("systemctl", "is-enabled", "--quiet", unit).Run() == nil
+-}
++// UnitEnabled lives in runit.go: it is init-aware (systemctl on systemd, the
++// turnstile provisioning on runit) so a Void box never needs a systemctl shim.
+ 
+ // InstalledVersion is the installed ryoku-desktop package version, or "".
+ func InstalledVersion() string {
+diff --git a/ryoku/shell/ipc/session.go b/ryoku/shell/ipc/session.go
+--- a/ryoku/shell/ipc/session.go	2026-11-17 22:07:58.284354897 -0600
++++ b/ryoku/shell/ipc/session.go	2026-11-17 22:09:52.286044800 -0600
+@@ -4,6 +4,7 @@
+ 	"encoding/json"
+ 	"fmt"
+ 	"log"
++	"os/exec"
+ 
+ 	"github.com/godbus/dbus/v5"
+ 
+@@ -65,7 +66,37 @@
+ 	}
+ 	go func() {
+ 		if err := login1PowerCall(method); err != nil {
+-			log.Printf("ryoku-shell: session %s: %v", action, err)
++			log.Printf("ryoku-shell: session %s (login1): %v", action, err)
++			// Void sin elogind (sólo seatd + runit): no hay login1 en el bus y
++			// no existe systemctl. Se cae a loginctl y, en último extremo, a los
++			// binarios directos del sistema.
++			runSessionPowerFallback(action)
+ 		}
+ 	}()
+ }
++
++// runSessionPowerFallback maps the dialog verbs onto loginctl verbs and onto
++// the direct binaries, trying them in that order.
++func runSessionPowerFallback(action string) {
++	var loginctlVerb, direct string
++	switch action {
++	case "reboot":
++		loginctlVerb, direct = "reboot", "reboot"
++	case "shutdown":
++		loginctlVerb, direct = "poweroff", "poweroff"
++	default:
++		log.Printf("ryoku-shell: session %s: sin fallback de energía", action)
++		return
++	}
++	if _, err := exec.LookPath("loginctl"); err == nil {
++		if err := exec.Command("loginctl", loginctlVerb).Run(); err == nil {
++			return
++		}
++	}
++	if _, err := exec.LookPath(direct); err == nil {
++		if err := exec.Command(direct).Run(); err == nil {
++			return
++		}
++	}
++	log.Printf("ryoku-shell: session %s: sin login1, ni loginctl, ni %s", action, direct)
++}

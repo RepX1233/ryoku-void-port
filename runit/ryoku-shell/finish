@@ -1,0 +1,4 @@
+#!/bin/sh
+# finish del stub legado: aparcar siempre (oneshot migrado a turnstile).
+exec 2>&1
+exec sv down .

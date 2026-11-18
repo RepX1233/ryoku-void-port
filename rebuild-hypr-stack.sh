@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 # =============================================================================
-# rebuild-hypr-stack.sh — Reconstruye el stack Hyprland contra
-# libdisplay-info 0.3.0 (.so.3) usando el árbol void-packages local.
+# rebuild-hypr-stack.sh — Reconstruye el stack Hyprland COMPLETO con CLANG
+# sobre el árbol void-packages local.
+#
+# Por qué Clang: Void trae GCC 14 y las versiones recientes de Hyprland
+# (0.50+, config Lua) usan C++23/26 que GCC 14 no se traga; el port oficial
+# de Void renunció a Hyprland por esto. Compilando con clang + lld el stack
+# completo se obtiene Hyprland moderno en Void sin esperar a GCC 15.
 #
 # Árbol:   ~/ryoku-void-build/void-packages  (masterdir-x86_64, layout directo)
 # Repo:    hostdir/binpkgs indexado con xbps-rindex; declarado en
 #          /etc/xbps.d/ryoku-hyprland-repo.conf
 #
 # Subcomandos (idempotentes, en este orden):
-#   build     ./xbps-src pkg de la lista BUILD_PKGS + poda de .xbps obsoletos
+#   build     ./xbps-src pkg de la lista BUILD_PKGS (con Clang inyectado en
+#             cada template) + poda de .xbps obsoletos
 #   repo      xbps-rindex -a + conf del repo local
-#   unhold    quita los holds de hyprutils / libdisplay-info / quickshell
+#   unhold    quita los holds del stack (para poder reinstalar)
 #   install   xbps-install -Sy de los paquetes actualizados
 #   cleanup   elimina el symlink /usr/lib/libdisplay-info.so.2 y revierte el
 #             parche manual de shlib-provides en pkgdb-*.plist
@@ -18,6 +24,10 @@
 #   all       build -> repo -> unhold -> install -> cleanup -> verify
 #
 # Uso:  ./rebuild-hypr-stack.sh [build|repo|unhold|install|cleanup|verify|all]
+# Env:  XBPS_MAKEJOBS  (si no está: 2 si la RAM total <= 6 GB, si no el
+#                       defecto de xbps-src; evita OOM al compilar Qt6/Hyprland
+#                       en máquinas con 4 GB)
+#       USE_CLANG=0    (vuelve al toolchain por defecto; no recomendado)
 #
 # NOTAS DE SEGURIDAD:
 #  - xbps-src NUNCA se ejecuta como root (esto lo valida).
@@ -36,18 +46,110 @@ REPO_CONF="/etc/xbps.d/ryoku-hyprland-repo.conf"
 REPO_LINE="repository=$BINPKGS"
 COMPAT_SYMLINK="/usr/lib/libdisplay-info.so.2"
 
-# Orden de dependencias: hyprutils -> aquamarine -> hyprland -> resto.
+# Orden de dependencias (respeta el grafo de build del stack):
+#   protocols -> scanner -> hyprutils -> graphics/lang -> cursor ->
+#   aquamarine -> picker -> hyprland -> idle/lock/sunset -> portales -> quickshell
 BUILD_PKGS=(
+  hyprland-protocols
+  hyprwayland-scanner
   hyprutils
+  hyprgraphics
+  hyprlang
+  hyprcursor
   aquamarine
+  hyprpicker
   hyprland
+  hypridle
+  hyprlock
+  hyprsunset
   xdg-desktop-portal-hyprland
+  hyprpolkitagent
   quickshell
 )
 # Paquetes a instalar tras unhold (idénticos a los reconstruidos).
 INSTALL_PKGS=("${BUILD_PKGS[@]}")
-# Holds a retirar (pkgname sin versión).
-HOLD_PKGS=(hyprutils libdisplay-info quickshell)
+# Holds a retirar (pkgname sin versión). Coincide con lo que fija
+# ryoku-void-install.sh para que main no reemplace el stack local.
+HOLD_PKGS=(
+  hyprland hyprland-protocols hyprwayland-scanner hyprutils hyprgraphics
+  hyprlang hyprcursor aquamarine hyprpicker hypridle hyprlock hyprsunset
+  xdg-desktop-portal-hyprland hyprpolkitagent quickshell libdisplay-info
+)
+
+# ---------------------------------------------------------------- toolchain
+# Clang por defecto (GCC 14 de Void no compila el C++23/26 de Hyprland
+# moderno). USE_CLANG=0 lo desactiva para experimentar.
+USE_CLANG=${USE_CLANG:-1}
+
+detect_toolchain() {
+  if [ "$USE_CLANG" != 1 ]; then
+    warn "USE_CLANG=0: se compilará con el toolchain por defecto de Void (GCC)"
+    CC_LANG=${CC:-cc} CXX_LANG=${CXX:-c++}
+    return 0
+  fi
+  command -v clang >/dev/null 2>&1 || die \
+    "falta 'clang' (instálalo: sudo xbps-install -y clang lld)"
+  command -v clang++ >/dev/null 2>&1 || die "falta 'clang++'"
+  CC_LANG=clang CXX_LANG=clang++
+  if command -v ld.lld >/dev/null 2>&1; then
+    LDFLAGS_LANG="${LDFLAGS:-} -fuse-ld=lld"
+  else
+    LDFLAGS_LANG="${LDFLAGS:-}"
+    warn "sin lld: se enlaza con el linker por defecto"
+  fi
+  info "toolchain: $CC_LANG / $CXX_LANG (${LDFLAGS_LANG:-sin LDFLAGS extra})"
+}
+
+# Límite de memoria para las compilaciones: con <= 6 GB de RAM se fuerza
+# XBPS_MAKEJOBS=2 para no morir por OOM al compilar Qt6/Hyprland.
+detect_makejobs() {
+  if [ -n "${XBPS_MAKEJOBS:-}" ]; then
+    info "XBPS_MAKEJOBS=$XBPS_MAKEJOBS (definido por el entorno)"
+    return 0
+  fi
+  local mem_kb
+  mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  if [ "$mem_kb" -gt 0 ] && [ "$mem_kb" -le 6291456 ]; then
+    export XBPS_MAKEJOBS=2
+    info "RAM ${mem_kb} kB <= 6 GB -> XBPS_MAKEJOBS=2 (anti-OOM)"
+  else
+    info "RAM ${mem_kb} kB > 6 GB -> XBPS_MAKEJOBS por defecto de xbps-src"
+  fi
+}
+
+# Inyecta el toolchain en un template de xbps-src (idempotente). xbps-src
+# hace source del template también en la fase de build, así que un
+# `export CC=...` a nivel de template llega a make/cmake.
+clangize_template() {
+  local tpl=$1
+  [ -f "$tpl" ] || return 0
+  [ "$USE_CLANG" = 1 ] || return 0
+  grep -q 'RYOKU_VOID_CLANG' "$tpl" && return 0
+  sed -i "1i # RYOKU_VOID_CLANG (inyectado por rebuild-hypr-stack.sh)\nexport CC=${CC_LANG}\nexport CXX=${CXX_LANG}\nexport LDFLAGS=\"\${LDFLAGS:-} ${LDFLAGS_LANG}\"" "$tpl"
+  # export CC=clang no basta: xbps-src sólo instala en el masterdir (chroot de
+  # build) lo que el template declara en hostmakedepends. gcc viene en
+  # base-chroot, pero clang/lld NO, así que hay que declararlos; de lo contrario
+  # la fase de build falla con "clang: not found".
+  local dep
+  for dep in clang lld; do
+    if grep -E '^hostmakedepends\+?=' "$tpl" | grep -qw "$dep"; then
+      continue   # ya declarado por el template upstream
+    fi
+    printf '# RYOKU_VOID_CLANG: toolchain dentro del chroot de xbps-src\nhostmakedepends+="%s"\n' " $dep" >>"$tpl"
+  done
+  info "clang+lld y toolchain inyectados en $(basename "$(dirname "$tpl")")"
+}
+
+# Fuerza -DHYPRLAND=ON en el template de quickshell (idempotente): sin esto
+# quickshell no sirve a la shell en Hyprland.
+qs_hyprland_flag() {
+  local tpl="$TREE/srcpkgs/quickshell/template"
+  [ -f "$tpl" ] || return 0
+  grep -q -- '-DHYPRLAND=ON' "$tpl" && return 0
+  sed -i 's/-DCPPTRACE_SIGNAL_SAFE_UNWIND=0/-DCPPTRACE_SIGNAL_SAFE_UNWIND=0 -DHYPRLAND=ON/' "$tpl" \
+    || die "no pude inyectar -DHYPRLAND=ON en quickshell/template"
+  info "-DHYPRLAND=ON inyectado en quickshell"
+}
 
 # ---------------------------------------------------------------- utilidades
 C_RST=$'\033[0m'; C_B=$'\033[1m'; C_G=$'\033[32m'; C_Y=$'\033[33m'
@@ -89,16 +191,24 @@ do_build() {
   dirty=$(git -C "$TREE" status --porcelain 2>/dev/null | wc -l)
   info "Plantillas locales sin commitear/modificadas: $dirty (esperado: templates hypr* locales)"
   for pkg in "${BUILD_PKGS[@]}"; do
-    [[ -f $TREE/srcpkgs/$pkg/template ]] || die "Falta la plantilla srcpkgs/$pkg/template en el árbol."
+    if [[ ! -f $TREE/srcpkgs/$pkg/template ]]; then
+      # Plantillas que el port copia desde Makrennel/hyprland-void en la
+      # Etapa 1b de ryoku-void-install.sh (hyprgraphics, hyprpicker...).
+      warn "Falta srcpkgs/$pkg/template (¿copiaste el overlay de Makrennel? Ejecuta la Etapa 1b de ryoku-void-install.sh)"
+    fi
   done
   ok "Fuentes verificadas; masterdir presente."
 
-  step "COMPILACIÓN CON xbps-src (orden de dependencias)"
+  step "COMPILACIÓN CON xbps-src (orden de dependencias, Clang)"
+  detect_toolchain
+  detect_makejobs
   info "Paquetes: ${BUILD_PKGS[*]}"
   cd "$TREE"
   local pkg
   for pkg in "${BUILD_PKGS[@]}"; do
     step "xbps-src pkg $pkg"
+    clangize_template "$TREE/srcpkgs/$pkg/template"
+    [ "$pkg" = quickshell ] && qs_hyprland_flag
     ./xbps-src pkg "$pkg"
     ok "$pkg compilado."
   done
@@ -323,10 +433,11 @@ PYEOF
   fi
 
   info "--- 6) holds ---"
-  local h
+  local h hold_re
   h=$(xbps-query -H 2>/dev/null || true)
-  if printf '%s\n' "$h" | grep -qE '^(hyprutils|libdisplay-info|quickshell)-'; then
-    warn "Quedan holds del stack: $(printf '%s\n' "$h" | grep -E '^(hyprutils|libdisplay-info|quickshell)-' | tr '\n' ' ')"; fail=1
+  hold_re=$(printf '%s\n' "${HOLD_PKGS[@]}" | paste -sd'|' -)
+  if printf '%s\n' "$h" | grep -qE "^(${hold_re})-"; then
+    warn "Quedan holds del stack: $(printf '%s\n' "$h" | grep -E "^(${hold_re})-" | tr '\n' ' ')"; fail=1
   else
     ok "Sin holds en el stack hyprland"
   fi

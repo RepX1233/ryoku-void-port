@@ -1,0 +1,31 @@
+#!/bin/sh
+# ============================================================================
+# Servicio de usuario: ryogami (daemon de wallpaper + paletas, turnstile+runit)
+# ----------------------------------------------------------------------------
+# Mismo contrato que ryoku-shell: entorno vía chpst -e desde la publicación de
+# ryoku-session-init; si no hay sesión, se aparca con `sv down .`.
+# ============================================================================
+exec 2>&1
+
+BIN=${RYOKU_BIN_DIR:-/usr/bin}
+RUNTIME=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+ENV_DIR=${RYOKU_SESSION_ENV:-$RUNTIME/ryoku-env}
+WAIT=${RYOKU_WAIT_SESSION:-120}
+
+PATH=${RYOKU_SESSION_PATH:-/usr/local/bin:/usr/bin:/bin}
+export PATH
+
+n=0
+while [ ! -f "$ENV_DIR/WAYLAND_DISPLAY" ]; do
+  n=$((n + 1))
+  if [ "$n" -ge "$WAIT" ]; then
+    echo "ryogami: sin entorno de sesión en $ENV_DIR tras ${WAIT}s; aparcado"
+    exec sv down .
+  fi
+  sleep 1
+done
+
+# jemalloc: menos fragmentación con muchos wallpapers en memoria.
+export MALLOC_CONF=narenas:2,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
+
+exec chpst -e "$ENV_DIR" "$BIN/ryogami"

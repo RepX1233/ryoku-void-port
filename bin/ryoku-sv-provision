@@ -1,0 +1,66 @@
+#!/bin/sh
+# ============================================================================
+# ryoku-sv-provision — Sincroniza las definiciones de servicios de usuario
+# ----------------------------------------------------------------------------
+# Copia /usr/lib/ryoku/runit/user/*  ->  ~/.config/service/  (el dir que
+# supervisa el runsvdir de turnstile). Idempotente y no destructivo:
+#
+#   * si el servicio NO existe, se crea con sus run/finish y el marcador
+#     `down` (arranca aparcado; lo levanta ryoku-session-init con `sv up`)
+#   * si existe, NO se pisa el run/finish del usuario: solo se actualiza si
+#     --force, y en ese caso guarda copia .bak
+#   * siempre asegura el marcador `down` en servicios recién instalados
+#
+# Uso:  ryoku-sv-provision [--force]
+# Env:  RYOKU_USER_SERVICE_DIR (default ~/.config/service)
+#       RYOKU_USER_SERVICE_SRC (default /usr/lib/ryoku/runit/user)
+# ============================================================================
+set -u
+
+SRC=${RYOKU_USER_SERVICE_SRC:-/usr/lib/ryoku/runit/user}
+DST=${RYOKU_USER_SERVICE_DIR:-$HOME/.config/service}
+FORCE=0
+[ "${1:-}" = "--force" ] && FORCE=1
+
+log() { printf 'ryoku-sv-provision: %s\n' "$*" >&2; }
+
+[ -d "$SRC" ] || { log "no existe $SRC (¿está instalado ryoku-desktop?)"; exit 0; }
+mkdir -p "$DST" || { log "no pude crear $DST"; exit 1; }
+
+updated=0 created=0
+for svcdir in "$SRC"/*; do
+  [ -d "$svcdir" ] || continue
+  name=$(basename "$svcdir")
+  target="$DST/$name"
+
+  if [ ! -d "$target" ]; then
+    mkdir -p "$target"
+    cp -a "$svcdir/." "$target/"
+    chmod 755 "$target/run" 2>/dev/null || true
+    chmod 755 "$target/finish" 2>/dev/null || true
+    # Arranca aparcado: sin sesión gráfica publicada no debe correr.
+    : > "$target/down"
+    created=$((created + 1))
+    continue
+  fi
+
+  # Servicio ya existente: solo con --force se reescriben run/finish.
+  if [ "$FORCE" = 1 ]; then
+    for f in run finish; do
+      [ -f "$svcdir/$f" ] || continue
+      if [ -f "$target/$f" ] && ! cmp -s "$svcdir/$f" "$target/$f"; then
+        cp -a "$target/$f" "$target/$f.bak"
+        cp -a "$svcdir/$f" "$target/$f"
+        chmod 755 "$target/$f"
+        updated=$((updated + 1))
+      elif [ ! -f "$target/$f" ]; then
+        cp -a "$svcdir/$f" "$target/$f"
+        chmod 755 "$target/$f"
+        updated=$((updated + 1))
+      fi
+    done
+  fi
+done
+
+log "servicios: $created nuevos, $updated actualizados (--force), dir=$DST"
+exit 0

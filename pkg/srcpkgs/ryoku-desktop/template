@@ -1,0 +1,131 @@
+# ============================================================================
+# Template file for 'ryoku-desktop' — port de Void (Hyprland + runit)
+# ----------------------------------------------------------------------------
+# Paquete NATIVO del port: todo el payload de Ryoku vive bajo xbps, de modo
+# que `xbps-install -yR <repo local> ryoku-desktop` lo instala/actualiza y
+# `xbps-remove ryoku-desktop` lo desinstala limpio (nada suelto en
+# /usr/local/bin ni en /usr/lib/qt6/qml sin rastrear).
+#
+# CÓMO SE CONSTRUYE (flujo de ryoku-void-install.sh):
+#   1. El instalador compila los binarios Go/CMake, el plugin QML, los módulos
+#      QML, los scripts y la config base, y los deja en FHS dentro de
+#      srcpkgs/ryoku-desktop/files/payload/  (usr/bin, usr/lib, usr/share...).
+#   2. `./xbps-src pkg ryoku-desktop` empaqueta ese payload tal cual
+#      (do_build es un no-op deliberado: no se compila nada dentro de xbps-src,
+#      la compilación es anterior y auditada por el instalador).
+#   3. xbps-rindex -a + xbps-install -yR desde hostdir/binpkgs.
+#
+# El version se inyecta con `sed` desde el instalador (git describe del
+# monorepo); el valor por defecto sirve para probar la plantilla a mano.
+# ============================================================================
+pkgname=ryoku-desktop
+version=0.0.0
+revision=1
+archs="x86_64"
+short_desc="Ryoku desktop payload for Void (Hyprland, Quickshell, runit)"
+maintainer="Ryoku Void Port <ryoku-void-port@local>"
+license="GPL-3.0-or-later, AGPL-3.0-or-later, MIT"
+homepage="https://github.com/RepX1233/ryoku-void-port"
+
+# --- cierre de runtime -------------------------------------------------------
+# Compositor (stack completo), sesión (runit/turnstile/elogind), toolkits,
+# herramientas que la shell llama por nombre y tipografías de la UI.
+depends="
+ quickshell
+ hyprland
+ hyprland-protocols
+ aquamarine
+ hypridle
+ hyprlock
+ hyprsunset
+ hyprpicker
+ hyprpolkitagent
+ xdg-desktop-portal-hyprland
+ xdg-desktop-portal-gtk
+ xdg-utils
+ xdg-user-dirs
+ qt6-base
+ qt6-declarative
+ qt6-multimedia
+ qt6-svg
+ qt6-wayland
+ pipewire
+ wireplumber
+ pulseaudio-utils
+ rtkit
+ dbus
+ elogind
+ turnstile
+ polkit
+ NetworkManager
+ gnome-keyring
+ matugen
+ grim
+ slurp
+ wl-clipboard
+ wl-clip-persist
+ cliphist
+ playerctl
+ wf-recorder
+ wtype
+ mpv
+ yt-dlp
+ cava
+ ffmpeg6
+ ImageMagick
+ jq
+ curl
+ socat
+ gum
+ qrencode
+ python3
+ inotify-tools
+ libnotify
+ brightnessctl
+ upower
+ ddcutil
+ power-profiles-daemon
+ tesseract
+ zbar
+ libqalculate
+ zenity
+ easyeffects
+ lsp-plugins-lv2
+ calf
+ openrgb
+ papirus-icon-theme
+ font-inter
+ noto-fonts-ttf
+ noto-fonts-cjk
+ noto-fonts-emoji
+ ttf-jetbrains-mono-nerd
+ ttf-material-symbols-variable
+"
+
+# --- política del port -------------------------------------------------------
+# /etc/ryoku-release y /etc/ryoku/boot-guard.conf los escribe el instalador
+# (canal/commit/usuario locales), no este paquete: así un rebuild manual del
+# paquete no pisa la configuración de arranque de esta máquina.
+
+do_build() {
+	# Payload precompilado por ryoku-void-install.sh en $FILESDIR/payload.
+	:
+}
+
+do_install() {
+	local payload="$FILESDIR/payload"
+	if [ ! -d "$payload" ]; then
+		printf 'ryoku-desktop: falta %s\n' "$payload" >&2
+		printf 'lo genera ryoku-void-install.sh antes de ./xbps-src pkg ryoku-desktop\n' >&2
+		return 1
+	fi
+	# El payload ya está en layout FHS (usr/bin, usr/lib, usr/share, ...).
+	cp -a "$payload/." "$DESTDIR/"
+	# Higiene: nada de artefactos de build dentro del paquete.
+	rm -f "$DESTDIR"/usr/lib/qt6/qml/Ryoku/*/install.sh \
+	      "$DESTDIR"/usr/lib/qt6/qml/Ryoku/*/*.pyc 2>/dev/null || true
+	rm -rf "$DESTDIR"/usr/lib/qt6/qml/Ryoku/*/__pycache__ 2>/dev/null || true
+	chmod -R u=rwX,go=rX "$DESTDIR/usr" "$DESTDIR/etc" 2>/dev/null || true
+	# Los binarios y los run de servicios deben ser ejecutables.
+	find "$DESTDIR/usr/bin" "$DESTDIR/usr/lib/ryoku" -type f -exec chmod 755 {} + 2>/dev/null || true
+}
