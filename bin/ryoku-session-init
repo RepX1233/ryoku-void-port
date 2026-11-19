@@ -1,0 +1,163 @@
+#!/bin/sh
+# ============================================================================
+# ryoku-session-init — Arranque de sesión gráfica de Ryoku en Void (runit)
+# ----------------------------------------------------------------------------
+# Lo ejecuta el compositor una vez por sesión (exec-once de hyprland.lua o del
+# hyprland.conf de respaldo). Es IDEMPOTENTE: puede correr varias veces (o en
+# paralelo) sin duplicar daemons, porque el único dueño de los daemons es
+# runit (servicios de usuario supervisados por turnstile).
+#
+#   1. Espera el entorno del compositor (WAYLAND_DISPLAY) con tope de tiempo.
+#   2. Vuelca el entorno a $XDG_RUNTIME_DIR/ryoku-env/  (formato envdir, lo
+#      consumen los servicios vía `chpst -e`) y lo espeja en TURNSTILE_ENV_DIR.
+#      Garantiza las 5 variables de sesión que la shell necesita.
+#   3. Enlaza $XDG_RUNTIME_DIR/service -> ~/.config/service (dir de turnstile)
+#      para que `SVDIR=$XDG_RUNTIME_DIR/service sv ...` funcione sin sudo.
+#   4. Provisiona (si faltan) y levanta el roster de servicios: `sv up`.
+#   5. Libro de guardia de arranque: incrementa el contador de intentos y lo
+#      pone a cero cuando la shell responde (para ryoku-boot-guard).
+#
+# Uso:  ryoku-session-init            (lo normal: desde exec-once)
+# Env:  RYOKU_USER_SERVICE_DIR, RYOKU_SESSION_ENV, RYOKU_SESSION_SERVICES,
+#       RYOKU_WAIT_SESSION (segundos, por defecto 60)
+# ============================================================================
+set -u
+
+BIN=${RYOKU_BIN_DIR:-/usr/bin}
+LIB=${RYOKU_INIT_LIB:-/usr/lib/ryoku/runit}
+SERVICE_DIR=${RYOKU_USER_SERVICE_DIR:-$HOME/.config/service}
+RUNTIME=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+ENV_DIR=${RYOKU_SESSION_ENV:-$RUNTIME/ryoku-env}
+SVDIR_LINK=${RYOKU_SVDIR:-$RUNTIME/service}
+TURNSTILE_ENV=${TURNSTILE_ENV_DIR:-$HOME/.config/service-env}
+ROSTER=${RYOKU_SESSION_SERVICES:-"ryoku-shell ryogami"}
+WAIT=${RYOKU_WAIT_SESSION:-60}
+STATE_DIR=${RYOKU_STATE_DIR:-$HOME/.local/state/ryoku/boot-guard}
+
+log() { printf 'ryoku-session-init: %s\n' "$*" >&2; }
+
+# --- 1. tope de espera del entorno del compositor --------------------------
+n=0
+while [ -z "${WAYLAND_DISPLAY:-}" ]; do
+  n=$((n + 1))
+  if [ "$n" -ge "$WAIT" ]; then
+    log "sin WAYLAND_DISPLAY tras ${WAIT}s; aborto (no hay sesión gráfica)"
+    exit 1
+  fi
+  sleep 1
+done
+
+# XDG_RUNTIME_DIR: turnstile/elogind lo publican; si nadie lo creó (instalación
+# solo con seatd) lo intentamos crear. Si no podemos (requiere root), seguimos:
+# los servicios usan /run/user/$(id -u) como ruta lógica igualmente.
+if [ ! -d "$RUNTIME" ]; then
+  mkdir -p "$RUNTIME" 2>/dev/null && chmod 700 "$RUNTIME" 2>/dev/null \
+    || log "aviso: no se pudo crear $RUNTIME (¿elogind/turnstile sin manage_rundir?)"
+fi
+
+# --- 2. publicar el entorno (envdir: un fichero por variable) --------------
+publish_env() {
+  dest=$1
+  mkdir -p "$dest" 2>/dev/null || { log "no pude crear $dest"; return 1; }
+  chmod 700 "$dest" 2>/dev/null || true
+  # env serializa los valores multilínea como líneas de continuación SIN '='.
+  # Se procesa línea a línea: la llegada de una continuación retira la parte
+  # ya escrita de esa variable (multilínea -> ignorada por completo, no
+  # publicada a medias) y $last queda vacío para no tocar nada por error.
+  last=
+  env | while IFS= read -r line; do
+    case $line in
+      *=*) ;;
+      *)
+        [ -n "$last" ] && rm -f "$dest/$last"
+        last=
+        continue
+        ;;
+    esac
+    name=${line%%=*}
+    value=${line#*=}
+    # Nombre válido de variable POSIX: descarta funciones exportadas de Bash
+    # (BASH_FUNC_foo%% -> '%' no es [A-Za-z0-9_]), restos con símbolos y
+    # nombres que empiezan por dígito.
+    case $name in
+      ''|*[!A-Za-z0-9_]*|[0-9]*) last=; continue ;;
+      PWD|OLDPWD|SHLVL|_|TURNSTILE_*|RYOKU_SESSION_*) last=; continue ;;
+    esac
+    # envdir: el valor es el contenido; sin salto final de línea.
+    if printf '%s' "$value" > "$dest/$name" 2>/dev/null; then
+      last=$name
+    else
+      last=
+      log "aviso: no pude publicar $name"
+    fi
+  done
+}
+
+# Las 5 variables que la shell necesita, con fallbacks razonables.
+[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] || \
+  HYPRLAND_INSTANCE_SIGNATURE=$(basename "$(ls -d "$RUNTIME"/hypr/*/ 2>/dev/null | head -n1)" 2>/dev/null || true)
+[ -n "${XDG_CURRENT_DESKTOP:-}" ] || XDG_CURRENT_DESKTOP=Hyprland
+[ -n "${QT_QPA_PLATFORM:-}" ] || QT_QPA_PLATFORM=wayland
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$RUNTIME/bus" ]; then
+  DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME/bus"
+fi
+export WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP \
+       QT_QPA_PLATFORM DBUS_SESSION_BUS_ADDRESS 2>/dev/null || true
+
+publish_env "$ENV_DIR" || exit 1
+# Espejo en el dir de entorno de turnstile (lo leen otros servicios y tools).
+if [ "$TURNSTILE_ENV" != "$ENV_DIR" ] && [ -d "$(dirname "$TURNSTILE_ENV")" ]; then
+  publish_env "$TURNSTILE_ENV" || true
+fi
+# El bus de sesión debe ver el entorno del compositor también.
+command -v dbus-update-activation-environment >/dev/null 2>&1 && \
+  dbus-update-activation-environment --all >/dev/null 2>&1 || true
+
+# --- 3. SVDIR enlazado al dir de servicios de turnstile ---------------------
+# ~/.config/service es el dir que supervisa el runsvdir de turnstile; el enlace
+# en $XDG_RUNTIME_DIR/service permite el uso canónico `SVDIR=... sv up`.
+if [ ! -e "$SVDIR_LINK" ]; then
+  ln -sfn "$SERVICE_DIR" "$SVDIR_LINK" 2>/dev/null || \
+    log "aviso: no pude enlazar $SVDIR_LINK -> $SERVICE_DIR"
+elif [ -L "$SVDIR_LINK" ]; then
+  ln -sfn "$SERVICE_DIR" "$SVDIR_LINK" 2>/dev/null || true
+fi
+
+# --- 4. provisionar y levantar el roster de servicios ----------------------
+if command -v ryoku-sv-provision >/dev/null 2>&1; then
+  ryoku-sv-provision || log "aviso: ryoku-sv-provision reportó problemas"
+elif [ -x "$LIB/../bin/ryoku-sv-provision" ]; then
+  "$LIB/../bin/ryoku-sv-provision" || true
+fi
+
+export SVDIR="${SVDIR_LINK:-$SERVICE_DIR}"
+for svc in $ROSTER; do
+  # Espera breve a que runsvdir cree supervise/ (turnstile lo hace al login).
+  m=0
+  while [ ! -d "$SERVICE_DIR/$svc/supervise" ] && [ "$m" -lt 50 ]; do
+    m=$((m + 1)); sleep 0.1 2>/dev/null || sleep 1
+  done
+  if [ -d "$SERVICE_DIR/$svc/supervise" ]; then
+    sv up "$svc" 2>/dev/null || log "aviso: sv up $svc falló"
+  else
+    log "aviso: servicio $svc sin supervisión (¿turnstile corriendo?)"
+  fi
+done
+
+# --- 5. guardia de arranque (contador de intentos) -------------------------
+if mkdir -p "$STATE_DIR" 2>/dev/null; then
+  attempts=$(cat "$STATE_DIR/attempts" 2>/dev/null || echo 0)
+  case $attempts in ''|*[!0-9]*) attempts=0 ;; esac
+  echo $((attempts + 1)) > "$STATE_DIR/attempts"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/last-attempt"
+  # Si la shell responde en 25s, el arranque fue bueno: reinicia el contador.
+  (
+    sleep 25
+    if "$BIN/ryoku-shell" ping >/dev/null 2>&1; then
+      echo 0 > "$STATE_DIR/attempts"
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/last-ok"
+    fi
+  ) >/dev/null 2>&1 &
+fi
+
+exit 0

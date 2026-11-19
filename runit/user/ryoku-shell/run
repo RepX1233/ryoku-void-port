@@ -1,0 +1,43 @@
+#!/bin/sh
+# ============================================================================
+# Servicio de usuario: daemon de la shell Ryoku (turnstile + runit)
+# ----------------------------------------------------------------------------
+# Provisionado en ~/.config/service/ryoku-shell por ryoku-sv-provision.
+# NO corre como root y NO rasca /proc de nadie: el entorno gráfico llega
+# publicado por ryoku-session-init en $XDG_RUNTIME_DIR/ryoku-env (envdir) y se
+# inyecta con `chpst -e`. Si no hay sesión publicada en el tope de tiempo, el
+# servicio se aparca solo (`sv down .`) y espera a que session-init lo levante
+# con `sv up`.
+# ============================================================================
+exec 2>&1
+
+BIN=${RYOKU_BIN_DIR:-/usr/bin}
+RUNTIME=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+ENV_DIR=${RYOKU_SESSION_ENV:-$RUNTIME/ryoku-env}
+WAIT=${RYOKU_WAIT_SESSION:-120}
+
+# PATH propio y saneado (turnstiled no siempre trae uno completo).
+PATH=${RYOKU_SESSION_PATH:-/usr/local/bin:/usr/bin:/bin}
+export PATH
+
+n=0
+while [ ! -f "$ENV_DIR/WAYLAND_DISPLAY" ]; do
+  n=$((n + 1))
+  if [ "$n" -ge "$WAIT" ]; then
+    echo "ryoku-shell: sin entorno de sesión en $ENV_DIR tras ${WAIT}s; aparcado"
+    exec sv down .
+  fi
+  sleep 1
+done
+
+# Ajustes de sesión de la shell (mismos que el upstream en Void).
+export RYOKU_POLKIT_AGENT=1
+# Frames decodificados por hardware en GPU offload no compositan en híbridas.
+export QT_MEDIA_BACKEND=ffmpeg
+export QT_FFMPEG_DECODING_HW_DEVICE_TYPES=
+
+# Limpia un daemon viejo que aún pueda poseer el socket.
+chpst -e "$ENV_DIR" "$BIN/ryoku-shell" quit >/dev/null 2>&1 || true
+
+# runit reinicia ./run cuando ./finish sale; aquí el dueño del ciclo es runit.
+exec chpst -e "$ENV_DIR" "$BIN/ryoku-shell" daemon

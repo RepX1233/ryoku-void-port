@@ -1,0 +1,84 @@
+#!/bin/sh
+# ============================================================================
+# ryoku-boot-guard — Servicio de sistema (oneshot) de protección de arranque
+# ----------------------------------------------------------------------------
+# Opcional: solo tiene sentido en raíces Btrfs con snapper (módulo 2E).
+#
+# Cómo cuenta los fallos: bin/ryoku-session-init incrementa
+#   ~/.local/state/ryoku/boot-guard/attempts  en cada arranque de sesión y lo
+#   pone a 0 en cuanto `ryoku-shell ping` responde. Si este servicio ve
+#   `attempts >= umbral` al arrancar, es que las N últimas sesiones gráficas no
+#   llegaron a funcionar:
+#
+#   * Siempre: alerta (wall + /var/log/ryoku-boot-guard.log).
+#   * Si BOOT_GUARD_AUTO_REVERT=1 (opt-in, /etc/ryoku/boot-guard.conf) y existe
+#     snapper con config root: revierte al último snapshot de un solo uso
+#     (normalmente el pre-actualización) y avisa de que hay que reiniciar.
+#
+# El servicio se aparca solo al terminar (`sv down .`), como todo oneshot de
+# runit; su `finish` también lo aparca para que runsv no lo relance.
+# ============================================================================
+exec 2>&1
+
+CONF=/etc/ryoku/boot-guard.conf
+LOG=/var/log/ryoku-boot-guard.log
+THRESHOLD=2
+
+if [ -r "$CONF" ]; then
+  # shellcheck disable=SC1090
+  . "$CONF"
+fi
+[ -n "${BOOT_GUARD_THRESHOLD:-}" ] && THRESHOLD=$BOOT_GUARD_THRESHOLD
+
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+say() { printf '%s ryoku-boot-guard: %s\n' "$(ts)" "$*" >>"$LOG" 2>&1; }
+
+# El usuario dueño de la sesión puede venir del conf o de SUDO_USER.
+GUARD_HOME=${BOOT_GUARD_HOME:-}
+if [ -z "$GUARD_HOME" ] && [ -n "${BOOT_GUARD_USER:-}" ]; then
+  GUARD_HOME=$(getent passwd "$BOOT_GUARD_USER" | cut -d: -f6)
+fi
+[ -n "$GUARD_HOME" ] || GUARD_HOME=$(getent passwd "${BOOT_GUARD_USER:-root}" | cut -d: -f6)
+
+STATE="$GUARD_HOME/.local/state/ryoku/boot-guard/attempts"
+say "arranque evaluado (umbral=$THRESHOLD, estado=$STATE)"
+
+if [ -r "$STATE" ]; then
+  attempts=$(cat "$STATE" 2>/dev/null || echo 0)
+else
+  attempts=0
+fi
+case $attempts in ''|*[!0-9]*) attempts=0 ;; esac
+
+if [ "$attempts" -lt "$THRESHOLD" ]; then
+  say "ok: $attempts intento(s) fallido(s) < umbral $THRESHOLD"
+  exec sv down .
+fi
+
+MSG="ATENCIÓN: la sesión gráfica de Ryoku no arrancó en los últimos $attempts intentos. Revisa: ryoku-shell ping, journal de la sesión, ~/.local/state/ryoku/boot-guard/."
+say "$MSG"
+printf '%s\n' "$MSG" | wall 2>/dev/null || true
+
+# --- revert automático (opt-in) ---------------------------------------------
+if [ "${BOOT_GUARD_AUTO_REVERT:-0}" = "1" ]; then
+  if command -v snapper >/dev/null 2>&1 && [ -r "/etc/snapper/configs/${BOOT_GUARD_SNAPPER_CONFIG:-root}" ]; then
+    cfg=${BOOT_GUARD_SNAPPER_CONFIG:-root}
+    say "auto-revert habilitado: buscando último snapshot en config '$cfg'"
+    num=$(snapper -c "$cfg" list -t single --columns number 2>/dev/null | tail -n1 | tr -cd '0-9')
+    if [ -n "$num" ]; then
+      say "revirtiendo al snapshot #$num (requiere reinicio)"
+      if snapper -c "$cfg" rollback "$num" >>"$LOG" 2>&1; then
+        echo "$num" > "$GUARD_HOME/.local/state/ryoku/boot-guard/reverted-to" 2>/dev/null || true
+        printf '%s\n' "ryoku-boot-guard: revertido al snapshot #$num; reinicia y elige el snapshot en Limine si no arranca." | wall 2>/dev/null || true
+      else
+        say "snapper rollback falló (¿permisos/subvol?)"
+      fi
+    else
+      say "sin snapshots de un solo uso que usar"
+    fi
+  else
+    say "auto-revert pedido pero no hay snapper/config root disponible"
+  fi
+fi
+
+exec sv down .

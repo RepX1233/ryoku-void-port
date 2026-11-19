@@ -1,0 +1,5 @@
+#!/bin/sh
+# finish de ryoku-boot-guard: es un oneshot; aparcar en cada salida para que
+# runsv no lo relance en bucle (el propio run ya hace `sv down .`).
+exec 2>&1
+exec sv down .

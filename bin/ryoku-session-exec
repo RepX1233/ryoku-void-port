@@ -1,0 +1,32 @@
+#!/bin/sh
+# ============================================================================
+# ryoku-session-exec — Lanzador de sesión Wayland para el display manager
+# ----------------------------------------------------------------------------
+# Se usa como `Exec=` de /usr/share/wayland-sessions/ryoku.desktop.
+# Si NO hay bus de sesión activo (socket $XDG_RUNTIME_DIR/bus ausente y
+# DBUS_SESSION_BUS_ADDRESS sin definir) envuelve el compositor con
+# dbus-run-session; en caso contrario lo lanza directamente para no crear un
+# bus anidado ni robar el bus que el DM/elogind ya publicó.
+#
+# Uso:  ryoku-session-exec [compositor...]     (default: Hyprland)
+# ============================================================================
+set -u
+
+if [ "$#" -eq 0 ]; then
+  set -- Hyprland
+fi
+
+RUNTIME=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+
+if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || [ -S "$RUNTIME/bus" ]; then
+  exec "$@"
+fi
+
+if command -v dbus-run-session >/dev/null 2>&1; then
+  exec dbus-run-session -- "$@"
+fi
+
+# Sin dbus-run-session disponible: se lanza igual (algunos helpers siguen
+# funcionando vía el bus del sistema); se avisa en stderr, no en la sesión.
+printf 'ryoku-session-exec: aviso: sin bus de sesión y sin dbus-run-session\n' >&2
+exec "$@"

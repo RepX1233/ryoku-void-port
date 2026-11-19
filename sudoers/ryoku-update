@@ -1,15 +1,34 @@
-# ryoku-void-port: permite `ryoku update` (botón Update del Hub) sin contraseña
-# y sin TTY. Comandos limitados al flujo de deploy en Void: deploy.sh instala
-# los helpers con install/cp, recarga el shim systemctl y aplica el tema de
-# arranque; con --system el CLI pide además un xbps-install -Su.
-# NOTA de seguridad: instalar esto otorga a subaru autonomía de escritura casi
-# total vía install/cp (equivalente funcional a root). Aceptable en un equipo
-# personal de un solo usuario; no instalar en máquinas multiusuario.
+# ============================================================================
+# ryoku-void-port — regla sudoers para actualizaciones SIN TTY (botón Update)
+# ----------------------------------------------------------------------------
+# ARCHIVO PLANTILLA: ryoku-void-install.sh sustituye @TUSER@ por el usuario
+# objetivo ($TUSER) y lo instala en /etc/sudoers.d/zz-ryoku-update con modo
+# 0440, validándolo antes con `visudo -cf`. No lo instales a mano.
+#
+# Duración del NOPASSWD (deliberadamente estrecha):
+#   * ryoku-void-update            -> el flujo de actualización del port
+#   * xbps-install -Syu / -Su      -> actualización de base del sistema
+#   * env RYOKU_MANAGED_UPDATE=1 xbps-install -Syu
+#                                    -> como lo invoca `ryoku update` upstream
+#   * xbps-install -yR <repo local> ryoku-desktop
+#                                    -> instalar/actualizar SOLO el paquete local
+#   * xbps-rindex -a <repo local>/*.xbps
+#                                    -> reindexar el repo local tras compilar
+#
+# Lo que EXPRÉSAMENTE NO se concede (antes era raíz encubierto):
+#   * /usr/bin/install y /usr/bin/cp  -> equivalen a root total
+#   * systemctl-shim / comandos arbitrarios
+#   * nada que admita argumentos libres fuera de las rutas acotadas de arriba
+#
 # El nombre zz-* es deliberado: sudo aplica la ÚLTIMA regla que casa, y este
 # archivo debe leerse DESPUÉS de `wheel` para que el NOPASSWD gane.
-subaru ALL=(root) NOPASSWD: \
-    /usr/bin/install, \
-    /usr/bin/cp, \
-    /usr/local/bin/systemctl, \
-    /usr/bin/ryoku-boot-apply, \
-    /usr/bin/xbps-install -Su
+# ============================================================================
+@TUSER@ ALL=(root) NOPASSWD: \
+    /usr/bin/ryoku-void-update, \
+    /usr/bin/ryoku-void-update --system, \
+    /usr/bin/ryoku-void-update --stack, \
+    /usr/bin/xbps-install -Syu, \
+    /usr/bin/xbps-install -Su, \
+    /usr/bin/env RYOKU_MANAGED_UPDATE=1 xbps-install -Syu, \
+    /usr/bin/xbps-install -yR /home/*/ryoku-void-build/void-packages/hostdir/binpkgs ryoku-desktop, \
+    /usr/bin/xbps-rindex -a /home/*/ryoku-void-build/void-packages/hostdir/binpkgs/*.xbps
